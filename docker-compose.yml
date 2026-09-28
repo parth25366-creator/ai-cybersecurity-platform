@@ -9,10 +9,14 @@ services:
     env_file: .env
     environment: { DATABASE_URL: "postgresql+psycopg://app:app@db:5432/app" }
     depends_on: { db: { condition: service_healthy } }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      retries: 5
     ports: ["8000:8000"]   # API docs at /docs, metrics at /metrics; drop this port in prod
   frontend:
     build: { context: ./frontend, args: { BACKEND_URL: "http://backend:8000" } }
     ports: ["3000:3000"]
-    depends_on: [backend]
+    depends_on: { backend: { condition: service_healthy } }
 volumes:
   pgdata: {}
