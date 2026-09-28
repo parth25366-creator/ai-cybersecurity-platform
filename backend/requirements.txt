@@ -8,7 +8,11 @@ pyjwt
 pwdlib[argon2]
 python-multipart
 pydantic-settings
+email-validator
 langchain-text-splitters
 httpx
+cachetools
+limits
+pypdf
 structlog
 prometheus-fastapi-instrumentator
