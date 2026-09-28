@@ -1,32 +1,89 @@
 # AI Cybersecurity Platform
 
-Next.js UI -> FastAPI -> PostgreSQL + pgvector. OpenAI powers embeddings (RAG) and a tool-calling agent
-(`SearchKB`, `LookupCVE`). JWT auth with admin / analyst / viewer roles, audit log, JSON logs, Prometheus metrics.
+[![CI](https://github.com/parth25366-creator/ai-cybersecurity-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/parth25366-creator/ai-cybersecurity-platform/actions/workflows/ci.yml)
 
-## Run
-    cp .env.example .env      # fill in OPENAI_API_KEY and JWT_SECRET
-    docker compose up --build
-    # UI http://localhost:3000   API docs http://localhost:8000/docs
+A security-analyst assistant. Ask about a CVE or an incident and an LLM agent answers using **your own playbooks**
+(retrieval-augmented generation) plus **live threat intelligence** (NIST NVD, CISA KEV, FIRST EPSS). Built as a
+secure-by-design full-stack app: role-based access control, audit trail, rate limiting, prompt-injection defences and a
+written [threat model](docs/threat-model.md).
 
-The first registered user becomes `admin`; everyone after is `viewer`
-(promote with `PATCH /users/{id}/role?role=analyst`).
+## What it does
+- **Grounded answers with sources**: retrieves relevant chunks from uploaded playbooks/advisories and cites them.
+- **Agent with tools**: decides when to search the knowledge base, look up a CVE (NVD), or check whether it is
+  actively exploited (CISA Known Exploited Vulnerabilities + EPSS score). Multi-step, capped at 5 steps.
+- **Document ingestion**: upload `.pdf`, `.txt`, `.md` (or `POST /kb`); split, embedded and stored in pgvector.
+- **RBAC**: `admin` / `analyst` / `viewer`. Analysts add knowledge, admins manage roles and read the audit log.
+- **Observability**: JSON logs, Prometheus metrics at `/metrics`, per-request timing, audit table.
 
-    curl -X POST localhost:8000/auth/register -H 'Content-Type: application/json' \
-         -d '{"email":"you@example.com","password":"a-long-password"}'
+## Architecture
+```mermaid
+flowchart LR
+    U[Browser] -->|/api/*| N[Next.js UI + proxy]
+    N --> A[FastAPI]
+    A -->|SQL + vector search| P[(PostgreSQL + pgvector)]
+    A -->|embeddings / chat| L[LLM provider]
+    A -->|tool calls| T[NVD / CISA KEV / FIRST EPSS]
+    A -->|/metrics| M[Prometheus]
+    A -->|JSON logs| C[CloudWatch]
+```
 
-Load knowledge (analyst/admin): `POST /kb {"source":"ir-playbook","text":"..."}`, then ask questions in the UI.
+**Agent loop:** question -> model picks tools (`SearchKB`, `LookupCVE`, `ExploitStatus`) -> tool results (fenced as
+untrusted data) go back to the model -> final answer plus the list of tools used. Every chat is written to the audit log.
 
-## Layout
-    backend/app/core.py   settings, models, DB      backend/app/ai.py    RAG + agent
-    backend/app/auth.py   JWT + RBAC                backend/app/main.py  REST routes, logging, metrics
-    frontend/app          login + chat UI
+## Tech stack
+| Layer | Choice | Why |
+|-------|--------|-----|
+| Frontend | Next.js 15, React 19, TypeScript | Server-side proxy avoids CORS; security headers set centrally |
+| API | FastAPI, SQLModel, Pydantic v2 | Typed validation on every input; auto OpenAPI docs at `/docs` |
+| Data | PostgreSQL 16 + **pgvector** (HNSW index) | One database for relational data and embeddings, no extra vector service |
+| AI | OpenAI-compatible client (OpenAI or Gemini), tool calling | Provider is swappable through env vars |
+| Auth | JWT (PyJWT), Argon2 (pwdlib), `limits` for rate limiting | Small, well-known libraries instead of hand-rolled crypto |
+| Ops | Docker Compose, GitHub Actions, structlog, prometheus-fastapi-instrumentator | Reproducible run, CI on every push |
 
-## AWS
-ECR (2 images) -> ECS Fargate (frontend public behind ALB; backend private via Service Connect,
-build the frontend with `--build-arg BACKEND_URL=http://backend:8000`) -> RDS PostgreSQL 16 (pgvector supported;
-run `CREATE EXTENSION vector` once) . OPENAI_API_KEY / JWT_SECRET / DATABASE_URL from Secrets Manager.
-Logs: `awslogs` driver -> CloudWatch (already JSON). Metrics: scrape `/metrics` with ADOT/Prometheus.
+## Quick start
+```bash
+cp .env.example .env        # set OPENAI_API_KEY and JWT_SECRET (openssl rand -hex 32)
+docker compose up --build
+# UI  http://localhost:3000      API docs  http://localhost:8000/docs
+```
+The first account you register becomes `admin`; everyone after is `viewer`. Promote users with
+`PATCH /users/{id}/role?role=analyst` (list ids with `GET /users`). Set `OPEN_REGISTRATION=false` to close signup.
 
-## Before production
-Rate-limit auth + chat (slowapi), Alembic migrations, HNSW index on `chunk.embedding`, pin dependencies,
-HTTPS + secure token storage (httpOnly cookie), tests.
+**Free option:** Google's Gemini API has a free tier with an OpenAI-compatible endpoint. Set `LLM_BASE_URL`, `CHAT_MODEL`
+and `EMBED_MODEL` as shown in `.env.example`.
+
+## API
+| Method | Path | Role | Purpose |
+|--------|------|------|---------|
+| POST | `/auth/register`, `/auth/login` | public | Create account / get JWT (login limited to 5/min per account) |
+| POST | `/chat` | any user | Ask the agent (10/min per user) |
+| POST | `/kb`, `/kb/upload` | analyst, admin | Add text or a file to the knowledge base |
+| GET/PATCH | `/users`, `/users/{id}/role` | admin | List users, change roles |
+| GET | `/audit` | admin | Last 100 audit events |
+| GET | `/health`, `/metrics` | public | Liveness, Prometheus metrics |
+
+## Testing and CI
+```bash
+cd backend && pip install -r requirements-dev.txt && pytest -q && ruff check . && bandit -q -r app -ll
+```
+28 tests run without network or database (SQLite, stubbed LLM): registration and login, argon2 storage, brute-force limiting,
+**forged / `alg=none` / expired tokens**, RBAC on every privileged route, immediate role changes, upload validation, the
+agent loop (step limit, tool errors), tool-input validation and prompt-injection fencing. GitHub Actions also builds the
+frontend and the Docker images on every push, and Dependabot keeps dependencies current.
+
+## Security
+See [docs/threat-model.md](docs/threat-model.md) for the threats considered, the control and test for each, and the
+limitations that remain (prompt injection is mitigated, not solved; single shared knowledge base; in-memory rate limiter).
+
+## Deploying to AWS
+ECR (two images) -> ECS Fargate (frontend behind an ALB with TLS; backend private via Service Connect; build the frontend
+with `--build-arg BACKEND_URL=http://backend:8000`) -> RDS PostgreSQL 16 (pgvector is supported; run
+`CREATE EXTENSION vector` once). Secrets from Secrets Manager; logs via the `awslogs` driver to CloudWatch (already JSON);
+scrape `/metrics` with the AWS Distro for OpenTelemetry. Not yet automated.
+
+## Roadmap
+Alembic migrations, Redis-backed rate limiting, streaming responses, per-user knowledge bases, Terraform for AWS,
+retrieval evaluation set (hit-rate / MRR), CSP header, MFA.
+
+## License
+MIT
