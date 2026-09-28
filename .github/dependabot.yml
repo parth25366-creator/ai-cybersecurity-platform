@@ -6,6 +6,9 @@ updates:
   - package-ecosystem: npm
     directory: /frontend
     schedule: { interval: weekly }
+    ignore:  # major bumps (Next, TypeScript, ...) need manual testing; take minor/patch only
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: docker
     directory: /backend
     schedule: { interval: monthly }
