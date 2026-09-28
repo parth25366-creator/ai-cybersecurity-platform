@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+sqlmodel
+psycopg[binary]
+pgvector
+openai
+pyjwt
+pwdlib[argon2]
+python-multipart
+pydantic-settings
+langchain-text-splitters
+httpx
+structlog
+prometheus-fastapi-instrumentator
